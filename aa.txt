@@ -1,3 +1,4 @@
+=== value_counts: classe ===
 classe
 Procedimento Comum Cível                                          16652
 Procedimento do Juizado Especial Cível                             4053
@@ -28,7 +29,7 @@ Cumprimento de Sentença - Reclamação Pré-processual                   1
 Consignação em Pagamento                                              1
 Name: count, dtype: int64
 
-
+=== value_counts: assunto ===
 assunto
 Bancários                                                    17374
 Empréstimo consignado                                         4404
@@ -38,7 +39,7 @@ Tarifas                                                        223
 Crédito Rotativo                                                20
 Name: count, dtype: int64
 
-
+=== value_counts: foro ===
 foro
 Foro Regional III - Jabaquara             3309
 Foro Central Cível                        1328
@@ -53,8 +54,7 @@ Foro de Chavantes                            1
 Foro de Eldorado Paulista                    1
 Name: count, Length: 330, dtype: int64
 
-
-
+=== value_counts: vara ===
 vara
 1ª Vara Cível                                    2655
 2ª Vara Cível                                    2477
@@ -68,3 +68,18 @@ vara
 Anexo do Juizado Especial Civel e Criminal          1
 3ª VARA EMPRESARIAL E CONFLITOS DE ARBITRAGEM       1
 Name: count, Length: 110, dtype: int64
+
+=== value_counts: magistrado ===
+magistrado
+ADRIANA CRISTINA PAGANINI DIAS SARTI             405
+MICHELLE FABIOLA DITTERT PUPULIM                 372
+CRISTIANE VIEIRA                                 337
+ALESSANDRA LAPERUTA NASCIMENTO ALVES DE MOURA    309
+SAMIRA DE CASTRO LORENA                          296
+                                                ... 
+EDUARDO GARCIA ALBUQUERQUE                         1
+ANDRÉ RODRIGUES MENK                               1
+JOSÉ PEDRO REBELLO GIANNINI                        1
+GUILHERME BECKER ATHERINO                          1
+BRUNA MONIELLE PINHEIRO ALVES                      1
+Name: count, Length: 1489, dtype: int64
