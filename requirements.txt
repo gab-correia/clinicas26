@@ -1,0 +1,15 @@
+pandas
+openai
+nest_asyncio
+tqdm
+matplotlib
+seaborn
+numpy
+openpyxl
+notebook
+ipykernel
+python-dotenv
+ipywidgets
+plotly
+streamlit
+nest-asyncio
