@@ -6,8 +6,10 @@ import os
 import json
 import asyncio
 import hashlib
+from pathlib import Path
 from dotenv import load_dotenv
 import plotly.express as px
+import plotly.graph_objects as go
 from openai import AsyncOpenAI
 import nest_asyncio
 
@@ -138,6 +140,167 @@ def load_data():
     df["valor_danos_morais_regex"]    = decisao.apply(regex_valor_morais)
     df["valor_danos_materiais_regex"] = decisao.apply(regex_valor_materiais)
     return df
+
+# --- GEOJSON & MAP FUNCTIONS ---
+GEOJSON_PATH = Path("geodata") / "SP.json"
+
+@st.cache_data
+def load_geojson():
+    """Load the São Paulo municipalities GeoJSON."""
+    with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def _normalizar_nome(nome):
+    """Normalize a name for comparison: remove accents, lowercase, strip."""
+    if pd.isna(nome):
+        return ""
+    t = unicodedata.normalize("NFKD", str(nome)).encode("ascii", "ignore").decode("ascii")
+    return t.strip().lower()
+
+@st.cache_data
+def build_comarca_to_geocodigo(geojson_data):
+    """Build a mapping from normalized municipality name to GEOCODIGO."""
+    mapping = {}
+    for feature in geojson_data["features"]:
+        nome = feature["properties"]["NOME"]
+        geocodigo = feature["properties"]["GEOCODIGO"]
+        mapping[_normalizar_nome(nome)] = geocodigo
+    return mapping
+
+def agregar_mapa_data(df, col_resultado, col_morais, comarca_map):
+    """Aggregate data by comarca and match to GeoJSON geocodigos.
+    
+    Returns a DataFrame with columns:
+      - comarca, geocodigo, total_processos, valor_medio_morais, taxa_procedencia
+    """
+    # Group by comarca
+    agg = df.groupby("comarca").agg(
+        total_processos=("id_processo", "count"),
+        valor_medio_morais=(col_morais, "mean"),
+    ).reset_index()
+    
+    # Taxa de procedência: % of processes that are "procedente" or "parcialmente procedente"
+    def _calc_taxa(group):
+        total = len(group)
+        if total == 0:
+            return 0.0
+        favoraveis = group[col_resultado].isin(["procedente", "parcialmente procedente"]).sum()
+        return (favoraveis / total) * 100
+    
+    taxa = df.groupby("comarca").apply(_calc_taxa, include_groups=False).reset_index()
+    taxa.columns = ["comarca", "taxa_procedencia"]
+    
+    agg = agg.merge(taxa, on="comarca", how="left")
+    
+    # Match comarca to geocodigo
+    agg["comarca_norm"] = agg["comarca"].apply(_normalizar_nome)
+    agg["geocodigo"] = agg["comarca_norm"].map(comarca_map)
+    
+    # Round values
+    agg["valor_medio_morais"] = agg["valor_medio_morais"].round(2)
+    agg["taxa_procedencia"] = agg["taxa_procedencia"].round(1)
+    
+    return agg
+
+def render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=""):
+    """Render a choropleth map of São Paulo state.
+    
+    Args:
+        df_mapa: DataFrame with geocodigo and metric columns
+        geojson_data: GeoJSON dict
+        metrica: One of 'volume', 'valor_morais', 'taxa_procedencia'
+        key_suffix: Unique key suffix for Streamlit widgets
+    """
+    # Filter rows that have a valid geocodigo match
+    df_plot = df_mapa[df_mapa["geocodigo"].notna()].copy()
+    
+    if df_plot.empty:
+        st.warning("Nenhuma comarca pôde ser mapeada para os municípios de SP.")
+        return
+    
+    # Metric config
+    metric_config = {
+        "volume": {
+            "col": "total_processos",
+            "title": "Volume de Processos por Comarca",
+            "label": "Nº Processos",
+            "scale": "YlOrRd",
+            "fmt": ",.0f",
+        },
+        "valor_morais": {
+            "col": "valor_medio_morais",
+            "title": "Valor Médio de Danos Morais por Comarca",
+            "label": "Valor Médio (R$)",
+            "scale": "Purples",
+            "fmt": ",.2f",
+        },
+        "taxa_procedencia": {
+            "col": "taxa_procedencia",
+            "title": "Taxa de Procedência por Comarca",
+            "label": "Procedência (%)",
+            "scale": "Greens",
+            "fmt": ".1f",
+        },
+    }
+    
+    cfg = metric_config[metrica]
+    
+    fig = px.choropleth(
+        df_plot,
+        geojson=geojson_data,
+        locations="geocodigo",
+        featureidkey="properties.GEOCODIGO",
+        color=cfg["col"],
+        color_continuous_scale=cfg["scale"],
+        hover_name="comarca",
+        hover_data={
+            "geocodigo": False,
+            "total_processos": ":,",
+            "valor_medio_morais": ":,.2f",
+            "taxa_procedencia": ":.1f",
+        },
+        labels={
+            cfg["col"]: cfg["label"],
+            "total_processos": "Processos",
+            "valor_medio_morais": "Danos Morais Médio (R$)",
+            "taxa_procedencia": "Procedência (%)",
+        },
+        title=cfg["title"],
+    )
+    
+    fig.update_geos(
+        fitbounds="locations",
+        visible=False,
+        bgcolor="rgba(0,0,0,0)",
+    )
+    
+    fig.update_layout(
+        margin={"r": 0, "t": 40, "l": 0, "b": 0},
+        height=600,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        coloraxis_colorbar=dict(
+            title=cfg["label"],
+            thickness=15,
+            len=0.7,
+        ),
+    )
+    
+    st.plotly_chart(fig, use_container_width=True, key=f"mapa_{metrica}_{key_suffix}")
+    
+    # Stats cards
+    matched = len(df_plot)
+    total_comarcas = len(df_mapa)
+    unmatched = total_comarcas - matched
+    
+    if unmatched > 0:
+        st.caption(f"📍 {matched} comarcas mapeadas de {total_comarcas} ({unmatched} sem correspondência no mapa)")
+    
+    # Top 10 ranking table
+    with st.expander("📊 Ranking — Top 20 Comarcas", expanded=False):
+        top = df_mapa.nlargest(20, cfg["col"])[["comarca", "total_processos", "valor_medio_morais", "taxa_procedencia"]]
+        top.columns = ["Comarca", "Processos", "Danos Morais Médio (R$)", "Procedência (%)"]
+        st.dataframe(top.reset_index(drop=True), use_container_width=True)
 
 # --- OPENAI ASYNC ---
 CACHE_PATH = "cache/cache_openai.json"
@@ -331,6 +494,10 @@ def main():
     
     tab1, tab2 = st.tabs(["📊 Visão Geral (Regex)", "🤖 Análise com IA (OpenAI)"])
     
+    # Load GeoJSON for maps
+    geojson_data = load_geojson()
+    comarca_map = build_comarca_to_geocodigo(geojson_data)
+    
     with tab1:
         st.subheader("Análise baseada em Expressões Regulares")
         
@@ -354,6 +521,30 @@ def main():
         fig2 = px.pie(resultado_counts, names="Resultado", values="Quantidade", title="Resultados dos Julgamentos")
         col_fig2.plotly_chart(fig2, use_container_width=True)
         
+        # --- Mapa Coroplético (Regex) ---
+        st.divider()
+        st.markdown("### 🗺️ Mapa de Processos — Estado de São Paulo")
+        
+        metrica_regex = st.selectbox(
+            "Selecione a métrica para o mapa:",
+            ["volume", "valor_morais", "taxa_procedencia"],
+            format_func=lambda x: {
+                "volume": "📊 Volume de Processos",
+                "valor_morais": "💰 Valor Médio de Danos Morais",
+                "taxa_procedencia": "⚖️ Taxa de Procedência (%)",
+            }[x],
+            key="metrica_mapa_regex",
+        )
+        
+        df_mapa_regex = agregar_mapa_data(
+            df_filtered,
+            col_resultado="resultado_julgamento_regex",
+            col_morais="valor_danos_morais_regex",
+            comarca_map=comarca_map,
+        )
+        render_mapa_sp(df_mapa_regex, geojson_data, metrica_regex, key_suffix="regex")
+        
+        st.divider()
         st.markdown("### Processos Encontrados")
         cols_to_show = ["id_processo", "assunto", "tipo_acao_regex", "resultado_julgamento_regex", "valor_danos_morais_regex", "culpa_atribuida_regex"]
         st.dataframe(df_filtered[cols_to_show], use_container_width=True)
@@ -419,6 +610,30 @@ def main():
             fig2 = px.pie(resultado_counts, names="Resultado", values="Quantidade", title="Resultados dos Julgamentos (IA)")
             col_fig2.plotly_chart(fig2, use_container_width=True)
             
+            # --- Mapa Coroplético (IA) ---
+            st.divider()
+            st.markdown("### 🗺️ Mapa de Processos — Análise IA")
+            
+            metrica_ia = st.selectbox(
+                "Selecione a métrica para o mapa:",
+                ["volume", "valor_morais", "taxa_procedencia"],
+                format_func=lambda x: {
+                    "volume": "📊 Volume de Processos",
+                    "valor_morais": "💰 Valor Médio de Danos Morais",
+                    "taxa_procedencia": "⚖️ Taxa de Procedência (%)",
+                }[x],
+                key="metrica_mapa_ia",
+            )
+            
+            df_mapa_ia = agregar_mapa_data(
+                df_display,
+                col_resultado="resultado_julgamento_ia",
+                col_morais="valor_danos_morais_ia",
+                comarca_map=comarca_map,
+            )
+            render_mapa_sp(df_mapa_ia, geojson_data, metrica_ia, key_suffix="ia")
+            
+            st.divider()
             cols_to_show_ia = ["id_processo", "assunto", "tipo_acao_ia", "resultado_julgamento_ia", "culpa_atribuida_ia", "valor_danos_morais_ia"]
             st.dataframe(df_display[cols_to_show_ia], use_container_width=True)
             
