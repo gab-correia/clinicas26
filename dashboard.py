@@ -244,46 +244,58 @@ def render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=""):
     }
     
     cfg = metric_config[metrica]
-    
-    fig = px.choropleth(
-        df_plot,
+
+    # Camada base: estado de SP inteiro com todos os municípios sempre desenhados.
+    all_geocodigos = [feat["properties"]["GEOCODIGO"] for feat in geojson_data["features"]]
+    all_nomes = [feat["properties"]["NOME"] for feat in geojson_data["features"]]
+
+    base = go.Choropleth(
         geojson=geojson_data,
-        locations="geocodigo",
+        locations=all_geocodigos,
         featureidkey="properties.GEOCODIGO",
-        color=cfg["col"],
-        color_continuous_scale=cfg["scale"],
-        hover_name="comarca",
-        hover_data={
-            "geocodigo": False,
-            "total_processos": ":,",
-            "valor_medio_morais": ":,.2f",
-            "taxa_procedencia": ":.1f",
-        },
-        labels={
-            cfg["col"]: cfg["label"],
-            "total_processos": "Processos",
-            "valor_medio_morais": "Danos Morais Médio (R$)",
-            "taxa_procedencia": "Procedência (%)",
-        },
-        title=cfg["title"],
+        z=[0] * len(all_geocodigos),
+        colorscale=[[0, "#1f2937"], [1, "#1f2937"]],
+        showscale=False,
+        marker_line_color="rgba(255,255,255,0.35)",
+        marker_line_width=0.4,
+        hovertext=all_nomes,
+        hovertemplate="<b>%{hovertext}</b><br><i>sem processos</i><extra></extra>",
     )
-    
+
+    data_layer = go.Choropleth(
+        geojson=geojson_data,
+        locations=df_plot["geocodigo"],
+        featureidkey="properties.GEOCODIGO",
+        z=df_plot[cfg["col"]],
+        colorscale=cfg["scale"],
+        marker_line_color="white",
+        marker_line_width=0.9,
+        customdata=df_plot[["comarca", "total_processos", "valor_medio_morais", "taxa_procedencia"]].values,
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Processos: %{customdata[1]:,}<br>"
+            "Danos morais médios: R$ %{customdata[2]:,.2f}<br>"
+            "Procedência: %{customdata[3]:.1f}%"
+            "<extra></extra>"
+        ),
+        colorbar=dict(title=cfg["label"], thickness=14, len=0.75, outlinewidth=0),
+    )
+
+    fig = go.Figure(data=[base, data_layer])
+
     fig.update_geos(
-        fitbounds="locations",
+        fitbounds="geojson",
         visible=False,
+        projection_type="mercator",
         bgcolor="rgba(0,0,0,0)",
     )
-    
+
     fig.update_layout(
-        margin={"r": 0, "t": 40, "l": 0, "b": 0},
-        height=600,
+        title=dict(text=cfg["title"], x=0.02, xanchor="left"),
+        margin={"r": 0, "t": 50, "l": 0, "b": 0},
+        height=620,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        coloraxis_colorbar=dict(
-            title=cfg["label"],
-            thickness=15,
-            len=0.7,
-        ),
     )
     
     st.plotly_chart(fig, use_container_width=True, key=f"mapa_{metrica}_{key_suffix}")
