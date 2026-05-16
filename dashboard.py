@@ -126,7 +126,6 @@ def load_data():
     if "magistrado" in df.columns:
         df["magistrado"] = df["magistrado"].astype(str).str.strip().str.upper()
     
-    # Apply regex
     decisao = df["decisao"].fillna("")
     df["justica_gratuita_regex"]      = decisao.apply(regex_justica_gratuita)
     df["rito_processual_regex"]       = decisao.apply(regex_rito_processual)
@@ -146,20 +145,16 @@ GEOJSON_PATH = Path("geodata") / "SP.json"
 
 @st.cache_data
 def load_geojson():
-    """Load the São Paulo municipalities GeoJSON."""
     with open(GEOJSON_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def _normalizar_nome(nome):
-    """Normalize a name for comparison: remove accents, lowercase, strip."""
-    if pd.isna(nome):
-        return ""
+    if pd.isna(nome): return ""
     t = unicodedata.normalize("NFKD", str(nome)).encode("ascii", "ignore").decode("ascii")
     return t.strip().lower()
 
 @st.cache_data
 def build_comarca_to_geocodigo(geojson_data):
-    """Build a mapping from normalized municipality name to GEOCODIGO."""
     mapping = {}
     for feature in geojson_data["features"]:
         nome = feature["properties"]["NOME"]
@@ -168,22 +163,14 @@ def build_comarca_to_geocodigo(geojson_data):
     return mapping
 
 def agregar_mapa_data(df, col_resultado, col_morais, comarca_map):
-    """Aggregate data by comarca and match to GeoJSON geocodigos.
-    
-    Returns a DataFrame with columns:
-      - comarca, geocodigo, total_processos, valor_medio_morais, taxa_procedencia
-    """
-    # Group by comarca
     agg = df.groupby("comarca").agg(
         total_processos=("id_processo", "count"),
         valor_medio_morais=(col_morais, "mean"),
     ).reset_index()
     
-    # Taxa de procedência: % of processes that are "procedente" or "parcialmente procedente"
     def _calc_taxa(group):
         total = len(group)
-        if total == 0:
-            return 0.0
+        if total == 0: return 0.0
         favoraveis = group[col_resultado].isin(["procedente", "parcialmente procedente"]).sum()
         return (favoraveis / total) * 100
     
@@ -191,61 +178,38 @@ def agregar_mapa_data(df, col_resultado, col_morais, comarca_map):
     taxa.columns = ["comarca", "taxa_procedencia"]
     
     agg = agg.merge(taxa, on="comarca", how="left")
-    
-    # Match comarca to geocodigo
     agg["comarca_norm"] = agg["comarca"].apply(_normalizar_nome)
     agg["geocodigo"] = agg["comarca_norm"].map(comarca_map)
-    
-    # Round values
     agg["valor_medio_morais"] = agg["valor_medio_morais"].round(2)
     agg["taxa_procedencia"] = agg["taxa_procedencia"].round(1)
-    
     return agg
 
 def render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=""):
-    """Render a choropleth map of São Paulo state.
-    
-    Args:
-        df_mapa: DataFrame with geocodigo and metric columns
-        geojson_data: GeoJSON dict
-        metrica: One of 'volume', 'valor_morais', 'taxa_procedencia'
-        key_suffix: Unique key suffix for Streamlit widgets
-    """
-    # Filter rows that have a valid geocodigo match
     df_plot = df_mapa[df_mapa["geocodigo"].notna()].copy()
-    
     if df_plot.empty:
         st.warning("Nenhuma comarca pôde ser mapeada para os municípios de SP.")
         return
     
-    # Metric config
     metric_config = {
-        "volume": {
-            "col": "total_processos",
-            "title": "Volume de Processos por Comarca",
-            "label": "Nº Processos",
-            "scale": "YlOrRd",
-            "fmt": ",.0f",
-        },
         "valor_morais": {
             "col": "valor_medio_morais",
             "title": "Valor Médio de Danos Morais por Comarca",
             "label": "Valor Médio (R$)",
-            "scale": "Purples",
+            "scale": [[0.0, '#2e1065'], [0.3, '#7e22ce'], [0.7, '#d946ef'], [1.0, '#fdf4ff']],
             "fmt": ",.2f",
+            "zmax": df_plot[df_plot["valor_medio_morais"] > 0]["valor_medio_morais"].quantile(0.80) if not df_plot[df_plot["valor_medio_morais"] > 0].empty else 100
         },
         "taxa_procedencia": {
             "col": "taxa_procedencia",
             "title": "Taxa de Procedência por Comarca",
             "label": "Procedência (%)",
-            "scale": "Greens",
+            "scale": [[0.0, '#022c22'], [0.3, '#059669'], [0.7, '#34d399'], [1.0, '#f0fdf4']],
             "fmt": ".1f",
+            "zmax": df_plot[df_plot["taxa_procedencia"] > 0]["taxa_procedencia"].quantile(0.85) if not df_plot[df_plot["taxa_procedencia"] > 0].empty else 100
         },
     }
-    
     cfg = metric_config[metrica]
 
-    # Camada base: estado de SP inteiro com todos os municípios sempre desenhados.
     all_geocodigos = [feat["properties"]["GEOCODIGO"] for feat in geojson_data["features"]]
     all_nomes = [feat["properties"]["NOME"] for feat in geojson_data["features"]]
 
@@ -267,6 +231,7 @@ def render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=""):
         locations=df_plot["geocodigo"],
         featureidkey="properties.GEOCODIGO",
         z=df_plot[cfg["col"]],
+        zmax=cfg["zmax"],
         colorscale=cfg["scale"],
         marker_line_color="white",
         marker_line_width=0.9,
@@ -282,37 +247,15 @@ def render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=""):
     )
 
     fig = go.Figure(data=[base, data_layer])
-
-    fig.update_geos(
-        fitbounds="geojson",
-        visible=False,
-        projection_type="mercator",
-        bgcolor="rgba(0,0,0,0)",
-    )
-
+    fig.update_geos(fitbounds="geojson", visible=False, projection_type="mercator", bgcolor="rgba(0,0,0,0)")
     fig.update_layout(
         title=dict(text=cfg["title"], x=0.02, xanchor="left"),
         margin={"r": 0, "t": 50, "l": 0, "b": 0},
         height=620,
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     
     st.plotly_chart(fig, use_container_width=True, key=f"mapa_{metrica}_{key_suffix}")
-    
-    # Stats cards
-    matched = len(df_plot)
-    total_comarcas = len(df_mapa)
-    unmatched = total_comarcas - matched
-    
-    if unmatched > 0:
-        st.caption(f"📍 {matched} comarcas mapeadas de {total_comarcas} ({unmatched} sem correspondência no mapa)")
-    
-    # Top 10 ranking table
-    with st.expander("📊 Ranking — Top 20 Comarcas", expanded=False):
-        top = df_mapa.nlargest(20, cfg["col"])[["comarca", "total_processos", "valor_medio_morais", "taxa_procedencia"]]
-        top.columns = ["Comarca", "Processos", "Danos Morais Médio (R$)", "Procedência (%)"]
-        st.dataframe(top.reset_index(drop=True), use_container_width=True)
 
 # --- OPENAI ASYNC ---
 CACHE_PATH = "cache/cache_openai.json"
@@ -328,21 +271,13 @@ def _salvar_cache(cache):
     with open(CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
-def _hash_decisao(texto):
-    return hashlib.md5(texto.encode("utf-8")).hexdigest()
+def _hash_decisao(texto): return hashlib.md5(texto.encode("utf-8")).hexdigest()
 
 _campos_padrao = {
-    "justica_gratuita": "não",
-    "rito_processual": "não identificado",
-    "tipo_acao": "não identificado",
-    "contato_previo_banco": "não",
-    "canal_contato": "não identificado",
-    "mencao_reclame_aqui": "não",
-    "boletim_de_ocorrencia": "não",
-    "resultado_julgamento": "não identificado",
-    "culpa_atribuida": "não identificado",
-    "valor_danos_morais": 0.0,
-    "valor_danos_materiais": 0.0,
+    "justica_gratuita": "não", "rito_processual": "não identificado", "tipo_acao": "não identificado",
+    "contato_previo_banco": "não", "canal_contato": "não identificado", "mencao_reclame_aqui": "não",
+    "boletim_de_ocorrencia": "não", "resultado_julgamento": "não identificado", "culpa_atribuida": "não identificado",
+    "valor_danos_morais": 0.0, "valor_danos_materiais": 0.0,
 }
 
 template_prompt = """Analise a decisão judicial abaixo e extraia as variáveis indicadas.
@@ -363,13 +298,11 @@ VARIÁVEIS:
 REGRAS DE PREENCHIMENTO:
 - justica_gratuita, contato_previo_banco, mencao_reclame_aqui, boletim_de_ocorrencia:
   retorne "não" se não houver menção explícita no texto. Nunca use "não identificado" nesses campos.
-- canal_contato: retorne o canal apenas se o texto mencionar explicitamente SAC, Ouvidoria, Procon,
-  Reclame Aqui ou visita à agência antes do ajuizamento. Caso contrário, retorne "não identificado".
+- canal_contato: retorne o canal apenas se o texto mencionar explicitamente SAC, Ouvidoria, Procon, Reclame Aqui ou agência.
 - culpa_atribuida:
-    • resultado=improcedente → "consumidor" (salvo se o texto indicar outro responsável)
-    • resultado=procedente ou parcialmente procedente → "banco" (salvo exceção explícita no texto)
+    • resultado=improcedente → "consumidor"
+    • resultado=procedente ou parcialmente procedente → "banco"
     • resultado=extinto → "não identificado"
-    • Use "não identificado" apenas se genuinamente ambíguo mesmo conhecendo o resultado.
 
 Retorne exatamente este JSON:
 {{"justica_gratuita":"...","rito_processual":"...","tipo_acao":"...","contato_previo_banco":"...","canal_contato":"...","mencao_reclame_aqui":"...","boletim_de_ocorrencia":"...","resultado_julgamento":"...","culpa_atribuida":"...","valor_danos_morais":0.0,"valor_danos_materiais":0.0}}
@@ -377,11 +310,7 @@ Retorne exatamente este JSON:
 Decisão:
 {decisao}"""
 
-prompt_sistema = (
-    "Você é um analista jurídico especializado em processos cíveis contra bancos. "
-    "Extraia informações estruturadas de decisões judiciais em português. "
-    "Responda APENAS com JSON válido, sem texto adicional."
-)
+prompt_sistema = "Você é um analista jurídico especializado. Extraia as informações. Responda APENAS com JSON válido."
 
 async def _chamar_decisao_async(idx, texto, semaforo, async_client, max_tentativas=4):
     prompt = template_prompt.format(decisao=texto)
@@ -389,44 +318,22 @@ async def _chamar_decisao_async(idx, texto, semaforo, async_client, max_tentativ
         for tentativa in range(max_tentativas):
             try:
                 resposta = await async_client.chat.completions.create(
-                    model="gpt-4.1",
-                    messages=[
-                        {"role": "system", "content": prompt_sistema},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0,
-                    response_format={"type": "json_object"},
+                    model="gpt-4.1", messages=[{"role": "system", "content": prompt_sistema}, {"role": "user", "content": prompt}],
+                    temperature=0, response_format={"type": "json_object"}
                 )
-                conteudo = resposta.choices[0].message.content.strip()
-                try:
-                    dados = json.loads(conteudo)
-                except:
-                    m = re.search(r"\{.*\}", conteudo, flags=re.DOTALL)
-                    if m:
-                        dados = json.loads(m.group(0))
-                    else:
-                        raise ValueError("No JSON found")
-                
+                dados = json.loads(resposta.choices[0].message.content.strip())
                 for campo in ("valor_danos_morais", "valor_danos_materiais"):
-                    try:
-                        dados[campo] = float(dados.get(campo) or 0.0)
-                    except:
-                        dados[campo] = 0.0
+                    dados[campo] = float(dados.get(campo) or 0.0)
                 return idx, {**_campos_padrao, **dados}
-
             except Exception as e:
-                is_429 = "429" in str(e)
-                is_last = tentativa == max_tentativas - 1
-                if is_429 and not is_last:
+                if "429" in str(e) and tentativa < max_tentativas - 1:
                     await asyncio.sleep(2 ** tentativa)
                     continue
                 return idx, {**_campos_padrao, "resultado_julgamento": f"ERRO: {str(e)}"}
 
 async def processar_async_batch(decisoes, progress_bar):
     api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return {"error": "OPENAI_API_KEY não definida no .env"}
-        
+    if not api_key: return {"error": "OPENAI_API_KEY não definida no .env"}
     async_client = AsyncOpenAI(api_key=api_key)
     cache_local = _carregar_cache()
     
@@ -435,37 +342,28 @@ async def processar_async_batch(decisoes, progress_bar):
     
     for i, texto in enumerate(decisoes):
         h = _hash_decisao(texto)
-        if h in cache_local:
-            resultados_final[i] = cache_local[h]
-        else:
-            indices_api.append(i)
+        if h in cache_local: resultados_final[i] = cache_local[h]
+        else: indices_api.append(i)
             
     semaforo = asyncio.Semaphore(5)
     tasks = [_chamar_decisao_async(i, decisoes[i], semaforo, async_client) for i in indices_api]
     
-    pendentes_flush = 0
-    concluidas = 0
+    pendentes_flush = concluidas = 0
     total = len(tasks)
     
     if total > 0:
         for coro in asyncio.as_completed(tasks):
             idx, resultado = await coro
             resultados_final[idx] = resultado
-            
             if not str(resultado.get("resultado_julgamento", "")).startswith("ERRO"):
                 cache_local[_hash_decisao(decisoes[idx])] = resultado
                 pendentes_flush += 1
-                
             if pendentes_flush >= 10:
                 _salvar_cache(cache_local)
                 pendentes_flush = 0
-                
             concluidas += 1
             progress_bar.progress(concluidas / total)
-            
-    if pendentes_flush > 0:
-        _salvar_cache(cache_local)
-        
+    if pendentes_flush > 0: _salvar_cache(cache_local)
     return resultados_final
 
 def run_ai_extraction(decisoes):
@@ -473,7 +371,190 @@ def run_ai_extraction(decisoes):
     loop = asyncio.get_event_loop()
     return loop.run_until_complete(processar_async_batch(decisoes, progress_bar))
 
-# --- UI APP ---
+
+# --- EDA REUSABLE FUNCTIONS ---
+def padronizar_canal(c):
+    c = str(c).lower().strip()
+    if 'whatsapp' in c or 'whats' in c: return 'whatsapp'
+    if 'e-mail' in c or 'email' in c: return 'e-mail'
+    if 'telefone' in c or 'sac' in c or '0800' in c: return 'telefone/sac'
+    if 'procon' in c: return 'procon'
+    if 'consumidor.gov' in c: return 'consumidor.gov'
+    if 'reclame aqui' in c or 'reclameaqui' in c: return 'reclame aqui'
+    if 'agência' in c or 'agencia' in c or 'presencial' in c: return 'agência presencial'
+    if c in ['não identificado', 'nan', 'não aplicável']: return 'não identificado'
+    return 'outro'
+
+def limpar_e_padronizar_dados(df, suffix):
+    cols_map = {
+        f"valor_danos_morais_{suffix}": "valor_danos_morais",
+        f"valor_danos_materiais_{suffix}": "valor_danos_materiais",
+        f"resultado_julgamento_{suffix}": "resultado_julgamento",
+        f"contato_previo_banco_{suffix}": "contato_previo_banco",
+        f"canal_contato_{suffix}": "canal_contato",
+        f"tipo_acao_{suffix}": "tipo_acao",
+        f"culpa_atribuida_{suffix}": "culpa_atribuida",
+        f"boletim_de_ocorrencia_{suffix}": "boletim_de_ocorrencia"
+    }
+    
+    df_eda = df.copy()
+    for old_col, new_col in cols_map.items():
+        if old_col in df_eda.columns:
+            df_eda[new_col] = df_eda[old_col]
+            
+    valores_positivos = df_eda[df_eda['valor_danos_morais'] > 0]['valor_danos_morais']
+    if not valores_positivos.empty:
+        q1_pos = valores_positivos.quantile(0.25)
+        q3_pos = valores_positivos.quantile(0.75)
+        iqr_pos = q3_pos - q1_pos
+        limite_superior = q3_pos + 1.5 * iqr_pos
+        if pd.isna(limite_superior):
+            limite_superior = 50000
+    else:
+        limite_superior = 0
+        
+    outliers = df_eda[df_eda['valor_danos_morais'] > limite_superior]
+    df_clean = df_eda[df_eda['valor_danos_morais'] <= limite_superior].copy()
+    
+    df_clean['canal_contato'] = df_clean['canal_contato'].apply(padronizar_canal)
+    freq_canais = df_clean[df_clean['canal_contato'] != 'não identificado']['canal_contato'].value_counts()
+    
+    if len(df_clean[df_clean['canal_contato'] != 'não identificado']) > 0:
+        limite_minimo = len(df_clean[df_clean['canal_contato'] != 'não identificado']) * 0.005
+        canais_relevantes = freq_canais[freq_canais >= max(2, limite_minimo)].index.tolist()
+        df_clean['canal_contato'] = df_clean['canal_contato'].apply(
+            lambda x: x if x in canais_relevantes or x == 'não identificado' else 'outro'
+        )
+        
+    return df_clean, limite_superior, len(outliers)
+
+def renderizar_eda_completa(df, suffix, geojson_data, comarca_map):
+    df_clean, lim_sup, q_outliers = limpar_e_padronizar_dados(df, suffix)
+    
+    if df_clean.empty:
+        st.warning("A base filtrada está vazia. Altere os filtros para visualizar os gráficos.")
+        return
+        
+    # ==============================================================
+    # PARTE 1: VISÃO GERAL
+    # ==============================================================
+    st.header("Parte 1: Visão Geral da Base de Dados")
+    
+    colA, colB = st.columns(2)
+    with colA:
+        df_plot_res = df_clean[df_clean['resultado_julgamento'] != 'outro']
+        if not df_plot_res.empty:
+            res_counts = df_plot_res['resultado_julgamento'].value_counts().reset_index()
+            res_counts.columns = ['Resultado', 'Quantidade']
+            fig_res = px.bar(res_counts, x='Quantidade', y='Resultado', orientation='h',
+                             title="Distribuição dos Resultados dos Julgamentos",
+                             color='Resultado', color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig_res.update_layout(showlegend=False)
+            st.plotly_chart(fig_res, use_container_width=True)
+            
+    with colB:
+        danos_morais_positivos = df_clean[df_clean['valor_danos_morais'] > 0]
+        if not danos_morais_positivos.empty:
+            fig_hist = px.histogram(danos_morais_positivos, x='valor_danos_morais', nbins=15,
+                                    title="Distribuição dos Valores de Danos Morais (Condenações > R$ 0)",
+                                    labels={'valor_danos_morais': 'Valor (R$)'},
+                                    color_discrete_sequence=['#9333ea'])
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+    st.markdown("### Mapas Coropléticos — Processos por Comarca (Estado de SP)")
+    metrica = st.selectbox(
+        "Selecione a métrica para visualizar no mapa:",
+        ["valor_morais", "taxa_procedencia"],
+        format_func=lambda x: {"valor_morais": "💰 Valor Médio de Morais", "taxa_procedencia": "⚖️ Taxa de Procedência (%)"}[x],
+        key=f"metrica_mapa_{suffix}"
+    )
+    df_mapa = agregar_mapa_data(df_clean, "resultado_julgamento", "valor_danos_morais", comarca_map)
+    render_mapa_sp(df_mapa, geojson_data, metrica, key_suffix=suffix)
+    
+    # ==============================================================
+    # PARTE 2: IMPACTO DO CONTATO PRÉVIO
+    # ==============================================================
+    st.header("Parte 2: Impacto do Contato Prévio")
+    
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        contagens = df_clean['contato_previo_banco'].value_counts().reset_index()
+        contagens.columns = ['Houve Contato?', 'Quantidade']
+        fig_pie = px.pie(contagens, values='Quantidade', names='Houve Contato?',
+                         title='Proporção de Contato Prévio',
+                         color='Houve Contato?',
+                         color_discrete_map={'sim':'#10b981', 'não':'#ef4444'})
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col2:
+        contato_res = df_clean.groupby(['contato_previo_banco', 'resultado_julgamento']).size().reset_index(name='count')
+        contato_res['Proporção (%)'] = contato_res.groupby('contato_previo_banco')['count'].transform(lambda x: x/x.sum() * 100)
+        fig_bar_res = px.bar(contato_res, x='contato_previo_banco', y='Proporção (%)', color='resultado_julgamento',
+                             title='Resultado do Julgamento por Contato Prévio (%)',
+                             labels={'contato_previo_banco': 'Houve Contato Prévio?'},
+                             text=contato_res['Proporção (%)'].apply(lambda x: f'{x:.1f}%'),
+                             color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_bar_res.update_layout(barmode='stack')
+        st.plotly_chart(fig_bar_res, use_container_width=True)
+
+    if not danos_morais_positivos.empty:
+        fig_box = px.box(danos_morais_positivos, x='contato_previo_banco', y='valor_danos_morais', color='contato_previo_banco',
+                         title='Distribuição do Valor de Danos Morais por Contato Prévio (Apenas > R$ 0)',
+                         labels={'contato_previo_banco': 'Houve Contato?', 'valor_danos_morais': 'Valor Danos Morais (R$)'},
+                         color_discrete_map={'sim':'#10b981', 'não':'#ef4444'})
+        st.plotly_chart(fig_box, use_container_width=True)
+    
+    col3, col4 = st.columns(2)
+    with col3:
+        tipo_contato = df_clean.groupby(['tipo_acao', 'contato_previo_banco']).size().reset_index(name='count')
+        tipo_contato['Proporção (%)'] = tipo_contato.groupby('tipo_acao')['count'].transform(lambda x: x/x.sum() * 100)
+        fig_tipo = px.bar(tipo_contato, x='tipo_acao', y='Proporção (%)', color='contato_previo_banco',
+                          title='Contato Prévio por Tipo de Ação (%)',
+                          labels={'tipo_acao': 'Tipo de Ação'},
+                          text=tipo_contato['Proporção (%)'].apply(lambda x: f'{x:.0f}%'),
+                          color_discrete_map={'sim':'#10b981', 'não':'#ef4444'})
+        fig_tipo.update_layout(barmode='stack')
+        st.plotly_chart(fig_tipo, use_container_width=True)
+        
+    with col4:
+        culpa_contato = df_clean.groupby(['culpa_atribuida', 'contato_previo_banco']).size().reset_index(name='count')
+        culpa_contato['Proporção (%)'] = culpa_contato.groupby('contato_previo_banco')['count'].transform(lambda x: x/x.sum() * 100)
+        fig_culpa = px.bar(culpa_contato, x='contato_previo_banco', y='Proporção (%)', color='culpa_atribuida',
+                           title='Culpa Atribuída por Contato Prévio (%)',
+                           labels={'contato_previo_banco': 'Houve Contato Prévio?'},
+                           text=culpa_contato['Proporção (%)'].apply(lambda x: f'{x:.0f}%'),
+                           color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig_culpa.update_layout(barmode='stack')
+        st.plotly_chart(fig_culpa, use_container_width=True)
+
+    # ==============================================================
+    # PARTE 3: ANÁLISE ESPECÍFICA POR CANAIS
+    # ==============================================================
+    st.header("Parte 3: Análise Específica por Canais")
+    canais = df_clean[df_clean['contato_previo_banco'] != 'não']
+    
+    if not canais.empty:
+        canais_counts = canais['canal_contato'].value_counts().reset_index()
+        canais_counts.columns = ['Canal de Contato', 'Quantidade']
+        fig_canais = px.bar(canais_counts, x='Quantidade', y='Canal de Contato', orientation='h',
+                            title='Canais de Contato Prévio Mais Utilizados',
+                            color='Quantidade', color_continuous_scale='Magma')
+        st.plotly_chart(fig_canais, use_container_width=True)
+
+        heatmap_data = pd.crosstab(canais['canal_contato'], canais['resultado_julgamento'], normalize='index') * 100
+        fig_heat = px.imshow(heatmap_data, text_auto=".1f", color_continuous_scale='YlGnBu',
+                             title='Probabilidade de Resultado por Canal de Contato (%)',
+                             labels=dict(x="Resultado", y="Canal de Contato", color="Proporção (%)"))
+        st.plotly_chart(fig_heat, use_container_width=True)
+    else:
+        st.info("Não há processos com contato prévio nos dados filtrados para exibir a análise de canais.")
+        
+    st.divider()
+    st.markdown("### Processos Encontrados (Base Limpa e Padronizada)")
+    st.dataframe(df_clean, use_container_width=True)
+
+# --- UI APP MAIN ---
 def main():
     st.title("⚖️ Dashboard Analítico - Processos Cíveis")
     
@@ -484,94 +565,70 @@ def main():
             st.error("O arquivo 'dataset_clinica_20261.csv' não foi encontrado na pasta raiz.")
             st.stop()
     
-    st.sidebar.header("Filtros")
+    st.sidebar.header("🔍 Filtros de Análise")
+    st.sidebar.markdown("Use os filtros abaixo para segmentar os casos e, em seguida, você pode analisá-los com IA.")
+    
+    # 1. Contato Prévio (DESTAQUE)
+    contato_opts = ["Todos"] + sorted([str(x) for x in df["contato_previo_banco_regex"].dropna().unique()])
+    contato_sel = st.sidebar.selectbox("📞 Houve Contato Prévio?", contato_opts, index=0)
+    
+    st.sidebar.divider()
+    
+    # 2. Outros filtros importantes
+    tipo_opts = sorted(df["tipo_acao_regex"].dropna().unique().tolist())
+    tipo_sel = st.sidebar.multiselect("Tipo de Ação", tipo_opts)
+    
+    resultado_opts = sorted(df["resultado_julgamento_regex"].dropna().unique().tolist())
+    resultado_sel = st.sidebar.multiselect("Resultado do Julgamento", resultado_opts)
+    
+    rito_opts = sorted(df["rito_processual_regex"].dropna().unique().tolist())
+    rito_sel = st.sidebar.multiselect("Rito Processual", rito_opts)
+    
+    jg_opts = sorted(df["justica_gratuita_regex"].dropna().unique().tolist())
+    jg_sel = st.sidebar.multiselect("Justiça Gratuita", jg_opts)
+    
+    st.sidebar.divider()
+    
+    # 3. Metadados do Caso
     assuntos = sorted(df["assunto"].dropna().unique().tolist())
     assunto_sel = st.sidebar.multiselect("Assunto", assuntos)
     
     comarcas = sorted(df["comarca"].dropna().unique().tolist())
     comarca_sel = st.sidebar.multiselect("Comarca", comarcas)
     
-    resultados_regex = sorted(df["resultado_julgamento_regex"].dropna().unique().tolist())
-    resultado_sel = st.sidebar.multiselect("Resultado (Regex)", resultados_regex)
-    
+    # Apply global filters based on dataset (using raw columns)
     df_filtered = df.copy()
+    
+    if contato_sel != "Todos":
+        df_filtered = df_filtered[df_filtered["contato_previo_banco_regex"] == contato_sel]
+    if tipo_sel:
+        df_filtered = df_filtered[df_filtered["tipo_acao_regex"].isin(tipo_sel)]
+    if resultado_sel:
+        df_filtered = df_filtered[df_filtered["resultado_julgamento_regex"].isin(resultado_sel)]
+    if rito_sel:
+        df_filtered = df_filtered[df_filtered["rito_processual_regex"].isin(rito_sel)]
+    if jg_sel:
+        df_filtered = df_filtered[df_filtered["justica_gratuita_regex"].isin(jg_sel)]
     if assunto_sel:
         df_filtered = df_filtered[df_filtered["assunto"].isin(assunto_sel)]
     if comarca_sel:
         df_filtered = df_filtered[df_filtered["comarca"].isin(comarca_sel)]
-    if resultado_sel:
-        df_filtered = df_filtered[df_filtered["resultado_julgamento_regex"].isin(resultado_sel)]
         
-    st.sidebar.markdown(f"**Total de processos filtrados: {len(df_filtered)}**")
+    st.sidebar.success(f"**{len(df_filtered)} processos** correspondem aos filtros.")
     
     tab1, tab2 = st.tabs(["📊 Visão Geral (Regex)", "🤖 Análise com IA (OpenAI)"])
     
-    # Load GeoJSON for maps
     geojson_data = load_geojson()
     comarca_map = build_comarca_to_geocodigo(geojson_data)
     
     with tab1:
         st.subheader("Análise baseada em Expressões Regulares")
-        
-        col1, col2, col3 = st.columns(3)
-        total_morais = df_filtered["valor_danos_morais_regex"].sum()
-        total_materiais = df_filtered["valor_danos_materiais_regex"].sum()
-        
-        col1.metric("Total de Processos", len(df_filtered))
-        col2.metric("Danos Morais (Total)", f"R$ {total_morais:,.2f}")
-        col3.metric("Danos Materiais (Total)", f"R$ {total_materiais:,.2f}")
-        
-        col_fig1, col_fig2 = st.columns(2)
-        
-        tipo_acao_counts = df_filtered["tipo_acao_regex"].value_counts().reset_index()
-        tipo_acao_counts.columns = ["Tipo de Ação", "Quantidade"]
-        fig1 = px.bar(tipo_acao_counts, x="Tipo de Ação", y="Quantidade", title="Volume por Tipo de Ação")
-        col_fig1.plotly_chart(fig1, use_container_width=True)
-        
-        resultado_counts = df_filtered["resultado_julgamento_regex"].value_counts().reset_index()
-        resultado_counts.columns = ["Resultado", "Quantidade"]
-        fig2 = px.pie(resultado_counts, names="Resultado", values="Quantidade", title="Resultados dos Julgamentos")
-        col_fig2.plotly_chart(fig2, use_container_width=True)
-        
-        # --- Mapa Coroplético (Regex) ---
-        st.divider()
-        st.markdown("### 🗺️ Mapa de Processos — Estado de São Paulo")
-        
-        metrica_regex = st.selectbox(
-            "Selecione a métrica para o mapa:",
-            ["volume", "valor_morais", "taxa_procedencia"],
-            format_func=lambda x: {
-                "volume": "📊 Volume de Processos",
-                "valor_morais": "💰 Valor Médio de Danos Morais",
-                "taxa_procedencia": "⚖️ Taxa de Procedência (%)",
-            }[x],
-            key="metrica_mapa_regex",
-        )
-        
-        df_mapa_regex = agregar_mapa_data(
-            df_filtered,
-            col_resultado="resultado_julgamento_regex",
-            col_morais="valor_danos_morais_regex",
-            comarca_map=comarca_map,
-        )
-        render_mapa_sp(df_mapa_regex, geojson_data, metrica_regex, key_suffix="regex")
-        
-        st.divider()
-        st.markdown("### Processos Encontrados")
-        cols_to_show = ["id_processo", "assunto", "tipo_acao_regex", "resultado_julgamento_regex", "valor_danos_morais_regex", "culpa_atribuida_regex"]
-        st.dataframe(df_filtered[cols_to_show], use_container_width=True)
-        
-        # Expander para ver as decisões
-        if not df_filtered.empty:
-            processo_sel = st.selectbox("Selecione um processo para ler a decisão:", df_filtered["id_processo"].tolist())
-            if processo_sel:
-                texto_decisao = df_filtered[df_filtered["id_processo"] == processo_sel]["decisao"].values[0]
-                with st.expander("Ler Decisão Original"):
-                    st.text(texto_decisao)
+        st.markdown("Esta aba exibe a Estatística Descritiva com base na extração via expressões regulares.")
+        renderizar_eda_completa(df_filtered, suffix="regex", geojson_data=geojson_data, comarca_map=comarca_map)
         
     with tab2:
         st.subheader("Extração Avançada (OpenAI)")
-        st.markdown("Nesta aba, você pode enviar os casos **atualmente filtrados** para a IA analisar de forma minuciosa. Os dados são armazenados em cache local, economizando custos.")
+        st.markdown("Nesta aba, você pode enviar os casos **atualmente filtrados na barra lateral** para a IA analisar de forma minuciosa. Os dados são armazenados em cache local, economizando custos.")
         
         if st.button(f"🚀 Analisar {len(df_filtered)} processos com IA", type="primary"):
             if len(df_filtered) == 0:
@@ -585,69 +642,16 @@ def main():
                         st.error(resultados_ia["error"])
                     else:
                         st.success("Análise concluída!")
-                        
                         df_ia = pd.DataFrame(resultados_ia)
                         df_ia = df_ia.rename(columns={c: f"{c}_ia" for c in _campos_padrao.keys()})
-                        
-                        # Store in session state corresponding to the filtered index
                         df_display = df_filtered.reset_index(drop=True).copy()
                         df_display = pd.concat([df_display, df_ia], axis=1)
-                        
-                        # Store exactly this snapshot in session_state
                         st.session_state["df_ia_display"] = df_display
                         
         if "df_ia_display" in st.session_state:
             df_display = st.session_state["df_ia_display"]
-            
             st.divider()
-            st.markdown("### Resultados da IA")
-            
-            col1, col2, col3 = st.columns(3)
-            total_morais_ia = df_display["valor_danos_morais_ia"].sum()
-            total_materiais_ia = df_display["valor_danos_materiais_ia"].sum()
-            
-            col1.metric("Total de Processos (IA)", len(df_display))
-            col2.metric("Danos Morais (IA)", f"R$ {total_morais_ia:,.2f}")
-            col3.metric("Danos Materiais (IA)", f"R$ {total_materiais_ia:,.2f}")
-            
-            col_fig1, col_fig2 = st.columns(2)
-            
-            tipo_acao_counts = df_display["tipo_acao_ia"].value_counts().reset_index()
-            tipo_acao_counts.columns = ["Tipo de Ação", "Quantidade"]
-            fig1 = px.bar(tipo_acao_counts, x="Tipo de Ação", y="Quantidade", title="Volume por Tipo de Ação (IA)", color_discrete_sequence=["#FF7F0E"])
-            col_fig1.plotly_chart(fig1, use_container_width=True)
-            
-            resultado_counts = df_display["resultado_julgamento_ia"].value_counts().reset_index()
-            resultado_counts.columns = ["Resultado", "Quantidade"]
-            fig2 = px.pie(resultado_counts, names="Resultado", values="Quantidade", title="Resultados dos Julgamentos (IA)")
-            col_fig2.plotly_chart(fig2, use_container_width=True)
-            
-            # --- Mapa Coroplético (IA) ---
-            st.divider()
-            st.markdown("### 🗺️ Mapa de Processos — Análise IA")
-            
-            metrica_ia = st.selectbox(
-                "Selecione a métrica para o mapa:",
-                ["volume", "valor_morais", "taxa_procedencia"],
-                format_func=lambda x: {
-                    "volume": "📊 Volume de Processos",
-                    "valor_morais": "💰 Valor Médio de Danos Morais",
-                    "taxa_procedencia": "⚖️ Taxa de Procedência (%)",
-                }[x],
-                key="metrica_mapa_ia",
-            )
-            
-            df_mapa_ia = agregar_mapa_data(
-                df_display,
-                col_resultado="resultado_julgamento_ia",
-                col_morais="valor_danos_morais_ia",
-                comarca_map=comarca_map,
-            )
-            render_mapa_sp(df_mapa_ia, geojson_data, metrica_ia, key_suffix="ia")
-            
-            st.divider()
-            cols_to_show_ia = ["id_processo", "assunto", "tipo_acao_ia", "resultado_julgamento_ia", "culpa_atribuida_ia", "valor_danos_morais_ia"]
-            st.dataframe(df_display[cols_to_show_ia], use_container_width=True)
+            renderizar_eda_completa(df_display, suffix="ia", geojson_data=geojson_data, comarca_map=comarca_map)
             
 if __name__ == "__main__":
     main()
