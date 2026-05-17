@@ -44,6 +44,69 @@ _PATTERNS = {
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# CLASSIFICAÇÃO DE ESCOPO EM 3 NÍVEIS (porta da Cell 7 do main.ipynb)
+# ════════════════════════════════════════════════════════════════════════════
+
+_PATTERNS_FORA = {
+    "cumprimento_ou_execucao": re.compile(
+        r"Classe\s*[-–]\s*Assunto\s*(Cumprimento de senten[çc]a|Execu[çc][aã]o)",
+        re.IGNORECASE,
+    ),
+    "embargos_declaracao": re.compile(
+        r"(embargos?\s+de\s+declara[çc][aã]o).{0,200}(nego\s+provimento|conhe[çc])",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "incompetencia_territorial": re.compile(
+        r"(reconhe[çc]o\s+a\s+incompet[êe]ncia|julgo\s+extinto.{0,300}incompet[êe]ncia)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "incapaz": re.compile(
+        r"julgo\s+extinto.{0,300}(art\.?\s*8|incapaz)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "indefiro_inicial": re.compile(
+        r"indefiro\s+a\s+inicial.{0,200}(julgo\s+extinto|extint)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "desistencia": re.compile(
+        r"homologo.{0,200}desist[êe]ncia.{0,200}(extinto|extin[çc][aã]o)",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    "acordo": re.compile(
+        r"homologo.{0,80}(acordo|transa[çc][aã]o).{0,200}extinto",
+        re.IGNORECASE | re.DOTALL,
+    ),
+}
+
+_PATTERNS_DENTRO = {
+    "julgamento_merito": re.compile(
+        r"julgo\s+(procedente|improcedente|parcialmente\s+procedente)",
+        re.IGNORECASE,
+    ),
+}
+
+
+def classificar_escopo_regex(texto: str) -> Dict[str, Any]:
+    """
+    Classifica o escopo de uma decisão em 3 níveis de confiança.
+
+    Retorna dict com:
+      - nivel: 1 (DENTRO), 2 (INCERTO — precisa LLM), 3 (FORA)
+      - resultado: False (dentro), None (incerto), True (fora)
+      - motivo: nome do padrão que casou, ou "incerto"
+    """
+    if not texto:
+        return {"nivel": 2, "resultado": None, "motivo": "incerto"}
+    for nome, padrao in _PATTERNS_FORA.items():
+        if padrao.search(texto):
+            return {"nivel": 3, "resultado": True, "motivo": nome}
+    for nome, padrao in _PATTERNS_DENTRO.items():
+        if padrao.search(texto):
+            return {"nivel": 1, "resultado": False, "motivo": nome}
+    return {"nivel": 2, "resultado": None, "motivo": "incerto"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # FUNÇÕES OTIMIZADAS
 # ════════════════════════════════════════════════════════════════════════════
 
