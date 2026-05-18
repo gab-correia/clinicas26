@@ -11,6 +11,7 @@ Duas abas:
 Sidebar único, filtros globais (afetam as duas abas).
 """
 
+import io
 import json
 import os
 import unicodedata
@@ -29,9 +30,24 @@ from regex_otimizado import classificar_escopo_regex, processar_batch
 
 # Raiz do projeto = pai da pasta dashboard/. Usada para localizar dataset, geojson e .env.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DASHBOARD_DIR = Path(__file__).resolve().parent
+CSV_FILENAME = "dataset_clinica_20261.csv"
+# Locais onde procuramos o CSV automaticamente, em ordem de preferência.
+CSV_CANDIDATE_PATHS = [
+    DASHBOARD_DIR / CSV_FILENAME,
+    PROJECT_ROOT / CSV_FILENAME,
+]
 
 nest_asyncio.apply()
 load_dotenv(PROJECT_ROOT / ".env")
+
+# Ponte para Streamlit Community Cloud: `st.secrets` não popula `os.environ` automaticamente.
+# Sem isso, `ia_pipeline._cliente()` falharia mesmo com OPENAI_API_KEY definido nos secrets do app.
+try:
+    if "OPENAI_API_KEY" in st.secrets and not os.getenv("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+except Exception:
+    pass
 
 st.set_page_config(page_title="Dashboard Jurídico — Itaú", layout="wide")
 
@@ -50,8 +66,11 @@ def corrigir_mojibake(valor):
 
 
 @st.cache_data(show_spinner=False)
-def load_data():
-    df = pd.read_csv(PROJECT_ROOT / "dataset_clinica_20261.csv", encoding="utf-8")
+def load_data(csv_bytes: bytes, _origem: str):
+    """Carrega o CSV a partir de bytes. `_origem` (path local ou nome do upload) entra na
+    chave de cache para invalidar quando a fonte muda — o conteúdo (`csv_bytes`) já é
+    suficiente, mas o rótulo também é hasheado e ajuda no debugging."""
+    df = pd.read_csv(io.BytesIO(csv_bytes), encoding="utf-8")
     colunas_texto = df.select_dtypes(include="object").columns
     for col in colunas_texto:
         df[col] = df[col].apply(corrigir_mojibake)
@@ -70,6 +89,20 @@ def load_data():
     df["fora_do_escopo_regex"] = [c["resultado"] for c in classificacoes]
 
     return df
+
+
+def _localizar_csv_local() -> Path | None:
+    for p in CSV_CANDIDATE_PATHS:
+        if p.exists():
+            return p
+    return None
+
+
+def _ler_bytes_csv(arquivo) -> bytes:
+    """Lê bytes do CSV — aceita Path ou UploadedFile do Streamlit."""
+    if isinstance(arquivo, Path):
+        return arquivo.read_bytes()
+    return arquivo.getvalue()
 
 
 @st.cache_data(show_spinner=False)
@@ -775,11 +808,34 @@ def render_aba_ia(geojson_data, comarca_map):
 def main():
     st.title("⚖️ Dashboard Jurídico — Petições Iniciais Itaú")
 
+    caminho_local = _localizar_csv_local()
+    csv_source = None
+    origem_label = None
+
+    if caminho_local is not None:
+        csv_source = caminho_local
+        origem_label = f"local::{caminho_local.name}"
+    else:
+        st.info(
+            f"📂 Arquivo **`{CSV_FILENAME}`** não encontrado em `dashboard/` ou na raiz do projeto. "
+            "Faça o upload abaixo para iniciar a análise. O arquivo fica apenas em memória nesta sessão."
+        )
+        uploaded = st.file_uploader(
+            "Selecione o CSV da base de processos",
+            type=["csv"],
+            accept_multiple_files=False,
+            help="Mesmo formato esperado pelo notebook (UTF-8, com a coluna `decisao`).",
+        )
+        if uploaded is None:
+            st.stop()
+        csv_source = uploaded
+        origem_label = f"upload::{uploaded.name}::{uploaded.size}"
+
     with st.spinner("Carregando dataset e rodando regex…"):
         try:
-            df = load_data()
-        except FileNotFoundError:
-            st.error("Arquivo `dataset_clinica_20261.csv` não encontrado na raiz do projeto.")
+            df = load_data(_ler_bytes_csv(csv_source), origem_label)
+        except Exception as e:
+            st.error(f"Falha ao processar o CSV: {e}")
             st.stop()
 
     geojson_data = load_geojson()
